@@ -31,6 +31,30 @@ impl Default for ClipboardKeyValueDisplay {
     }
 }
 
+impl ClipboardKeyValueDisplay {
+    fn update_value(&mut self) {
+        let mut min_levenshtein_distance = f64::MAX;
+        let mut min_levenshtein_value = String::new();
+        for (k, v) in &self.pairs {
+            let distance = str_distance_normalized(&self.key, k, Levenshtein::default());
+            if distance < min_levenshtein_distance {
+                min_levenshtein_distance = distance;
+                min_levenshtein_value = v.clone();
+                if distance == 0.0 {
+                    break;
+                }
+            }
+        }
+        let levenshtein_clone = min_levenshtein_value.clone();
+        self.value = min_levenshtein_value;
+        let _ = match self.value_sender {
+            Some(ref sender) => sender.send(levenshtein_clone),
+            None => Ok(())
+        };
+        self.last_updated_key = self.key.clone();
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn get_selected_or_clipboard_text(clipboard: &mut Clipboard) -> Result<String, arboard::Error> {
     use arboard::GetExtLinux;
@@ -53,32 +77,13 @@ impl eframe::App for ClipboardKeyValueDisplay {
         }
 
         self.key = get_selected_or_clipboard_text(&mut self.clipboard).unwrap_or_else(|_| self.key.clone());
-
         let mut rendered_text = String::new();
         let render_text = self.shown.load(atomic::Ordering::Relaxed);
         if !render_text && self.value_sender.is_none() {
             self.value = String::new();
             self.last_updated_key = String::new();
         } else if self.last_updated_key != self.key {
-            let mut min_levenshtein_distance = f64::MAX;
-            let mut min_levenshtein_value = String::new();
-            for (k, v) in &self.pairs {
-                let distance = str_distance_normalized(&self.key, k, Levenshtein::default());
-                if distance < min_levenshtein_distance {
-                    min_levenshtein_distance = distance;
-                    min_levenshtein_value = v.clone();
-                    if distance == 0.0 {
-                        break;
-                    }
-                }
-            }
-            let levenshtein_clone = min_levenshtein_value.clone();
-            self.value = min_levenshtein_value;
-            let _ = match self.value_sender {
-                Some(ref sender) => sender.send(levenshtein_clone),
-                None => Ok(())
-            };
-            self.last_updated_key = self.key.clone();
+            self.update_value();
         }
 
         if render_text {
@@ -154,17 +159,19 @@ fn main() {
         }
     });
 
-    let latest_clip_content = Arc::new(Mutex::new(String::new()));
-    let latest_clip_content_clone = latest_clip_content.clone();
+    let latest_output_value = Arc::new(Mutex::new(String::new()));
+    let latest_output_value_clone = latest_output_value.clone();
     thread::spawn(move || {
         loop {
-            let v = tts_receiver.lock().unwrap().recv().unwrap();
-            *latest_clip_content.lock().unwrap() = v.clone();
+            *latest_output_value.lock().unwrap() = tts_receiver.lock().unwrap().recv().unwrap();
         }
     });
 
     GKey.bind(move || {
-        tts.lock().unwrap().speak(latest_clip_content_clone.lock().unwrap().clone(), true).unwrap_or_else(|e| {
+        if latest_output_value_clone.lock().unwrap().is_empty() {
+            return;
+        }
+        tts.lock().unwrap().speak(latest_output_value_clone.lock().unwrap().clone(), true).unwrap_or_else(|e| {
             println!("Failed to speak. Reason: {}", e.to_string());
             return None;
         });
